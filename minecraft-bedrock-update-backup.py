@@ -3,11 +3,22 @@ import sys
 import logging
 import shutil
 import zipfile
-import tarfile
 import math
 import concurrent.futures
 import subprocess
+import time
 from datetime import datetime
+
+if sys.platform == 'linux':
+    BEDROCK_EXECUTABLE ='bedrock_server'
+    CLEAR_SCREEN = 'clear'
+if sys.platform == 'win32':
+    BEDROCK_EXECUTABLE = 'bedrock_server.exe'
+    CLEAR_SCREEN = 'cls'
+if sys.platform == 'darwin':
+    print("MacOS does not support Minecraft Bedrock Server.\nExit...")
+    time.sleep(2.5)
+    exit(1)
 
 # Ensure requests is installed
 try:
@@ -24,6 +35,8 @@ except ImportError or ModuleNotFoundError:
     print("Installing required package: tqdm")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "tqdm"])
     from tqdm import tqdm
+
+os.system(CLEAR_SCREEN)
 
 minecraft_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -108,8 +121,8 @@ def create_backup():
         raise
 
 newInstall = False
-# Check if bedrock_server.exe exists
-server_exe = os.path.join(minecraft_directory, 'bedrock_server.exe')
+# Check if bedrock_server executable exists
+server_exe = os.path.join(minecraft_directory, BEDROCK_EXECUTABLE)
 if not os.path.isfile(server_exe):
     newInstall = True
     user_input = input("Bedrock Server not found. Would you like to download it? (y/n): ")
