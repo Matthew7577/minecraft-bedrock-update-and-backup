@@ -7,16 +7,34 @@ import math
 import concurrent.futures
 import subprocess
 import time
+import hashlib
+import json
 from datetime import datetime
 
+def set_executable_permission(file_path):
+    """Set executable permission on Linux"""
+    if sys.platform == 'linux':
+        try:
+            current = os.stat(file_path)
+            os.chmod(file_path, current.st_mode | 0o111)  # Add executable permission
+        except Exception as e:
+            print(f"Warning: Could not set executable permissions on {file_path}: {e}")
+
+# Set platform-specific variables
 if sys.platform == 'linux':
-    BEDROCK_EXECUTABLE ='bedrock_server'
+    BEDROCK_EXECUTABLE = 'bedrock_server'
     CLEAR_SCREEN = 'clear'
-if sys.platform == 'win32':
+    SERVER_PLATFORM = 'linux'
+elif sys.platform == 'win32':
     BEDROCK_EXECUTABLE = 'bedrock_server.exe'
     CLEAR_SCREEN = 'cls'
-if sys.platform == 'darwin':
+    SERVER_PLATFORM = 'windows'
+elif sys.platform == 'darwin':
     print("MacOS does not support Minecraft Bedrock Server.\nExit...")
+    time.sleep(2.5)
+    exit(1)
+else:
+    print(f"Unsupported platform: {sys.platform}\nExit...")
     time.sleep(2.5)
     exit(1)
 
@@ -40,15 +58,46 @@ os.system(CLEAR_SCREEN)
 
 minecraft_directory = os.path.dirname(os.path.abspath(__file__))
 
+def calculate_folder_hash(items_to_backup):
+    """Calculate a hash of the folder contents based on file names, sizes, and modification times"""
+    hasher = hashlib.sha256()
+    
+    for item in sorted(items_to_backup):  # Sort to ensure consistent order
+        item_path = os.path.join(minecraft_directory, item)
+        if os.path.isfile(item_path):
+            stat = os.stat(item_path)
+            # Hash file path, size and modification time
+            file_info = f"{item}|{stat.st_size}|{stat.st_mtime}".encode()
+            hasher.update(file_info)
+        elif os.path.isdir(item_path):
+            for root, dirs, files in os.walk(item_path):
+                for file in sorted(files):  # Sort to ensure consistent order
+                    file_path = os.path.join(root, file)
+                    stat = os.stat(file_path)
+                    # Hash relative path, size and modification time
+                    file_info = f"{os.path.relpath(file_path, minecraft_directory)}|{stat.st_size}|{stat.st_mtime}".encode()
+                    hasher.update(file_info)
+    
+    return hasher.hexdigest()
+
+def load_backup_hashes():
+    """Load the backup hashes from the JSON file"""
+    hash_file = os.path.join(minecraft_directory, "backup", "backup_hashes.json")
+    if os.path.exists(hash_file):
+        try:
+            with open(hash_file, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_backup_hashes(hashes):
+    """Save the backup hashes to the JSON file"""
+    hash_file = os.path.join(minecraft_directory, "backup", "backup_hashes.json")
+    with open(hash_file, 'w') as f:
+        json.dump(hashes, f, indent=2)
+
 def create_backup():
-    # Create timestamp for backup folder and zip file
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_dir = os.path.join(minecraft_directory, "backup", f"Backup-{timestamp}")
-    backup_zip = os.path.join(minecraft_directory, "backup", f"Backup-{timestamp}.zip")
-    
-    # Create backup directory
-    os.makedirs(backup_dir, exist_ok=True)
-    
     # Get list of items to backup (excluding script, updater folder, and backup folder)
     excluded_items = {
         os.path.basename(__file__),  # Current script
@@ -57,65 +106,72 @@ def create_backup():
     }
     
     try:
-        # Copy all items except excluded ones in parallel for speed
-        items_to_copy = [item for item in os.listdir(minecraft_directory) if item not in excluded_items]
+        # Get list of items to backup
+        items_to_backup = [item for item in os.listdir(minecraft_directory) if item not in excluded_items]
 
-        def copy_item(item):
-            src_path = os.path.join(minecraft_directory, item)
-            dst_path = os.path.join(backup_dir, item)
+        # Calculate hash of current folder contents
+        current_hash = calculate_folder_hash(items_to_backup)
+        
+        # Load existing backup hashes
+        backup_hashes = load_backup_hashes()
+        
+        # Check if we already have a backup with this hash
+        if current_hash in backup_hashes:
+            existing_backup = backup_hashes[current_hash]
+            if os.path.exists(existing_backup):
+                print(f"Skipping backup: Content identical to existing backup at {existing_backup}")
+                return existing_backup
+            else:
+                # If the file doesn't exist anymore, remove it from our hash records
+                del backup_hashes[current_hash]
+                save_backup_hashes(backup_hashes)
+
+        # Create timestamp for backup file
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        
+        # Try to use 7z (external) for faster archiving if available
+        seven = shutil.which('7z') or shutil.which('7za') or shutil.which('7zr')
+        if seven:
+            backup_archive = os.path.join(minecraft_directory, 'backup', f"Backup-{timestamp}.7z")
+            print(f"Creating archive with 7z ({seven}): {backup_archive}")
             try:
-                if os.path.isfile(src_path):
-                    shutil.copy2(src_path, dst_path)
-                elif os.path.isdir(src_path):
-                    shutil.copytree(src_path, dst_path)
-                return (item, None)
-            except Exception as e:
-                return (item, e)
+                # Create list of items to archive
+                items_paths = [os.path.join(minecraft_directory, item) for item in items_to_backup]
+                # Run 7z directly on the source files
+                subprocess.run([seven, 'a', '-t7z', '-m0=LZMA2:d32m:fb32', '-mx=3', '-mmt=on', backup_archive] + items_paths, check=True)
+                # Save the hash
+                backup_hashes[current_hash] = backup_archive
+                save_backup_hashes(backup_hashes)
+                print(f"Backup archive created successfully: {backup_archive}")
+                return backup_archive
+            except subprocess.CalledProcessError as e:
+                print(f"7z failed ({e}), falling back to zip method")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(copy_item, item): item for item in items_to_copy}
-            for fut in concurrent.futures.as_completed(futures):
-                item, err = fut.result()
-                if err:
-                    print(f"Error backing up {item}: {err}")
-                else:
-                    # Progress feedback could be added here
-                    pass
+        # Fallback: create zip file directly from source files using no compression for speed
+        backup_zip = os.path.join(minecraft_directory, "backup", f"Backup-{timestamp}.zip")
+        print(f"Creating backup archive: {backup_zip}")
+        with zipfile.ZipFile(backup_zip, 'w', zipfile.ZIP_STORED) as zipf:
+            for item in items_to_backup:
+                item_path = os.path.join(minecraft_directory, item)
+                if os.path.isfile(item_path):
+                    zipf.write(item_path, item)
+                elif os.path.isdir(item_path):
+                    for root, dirs, files in os.walk(item_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            arcname = os.path.relpath(file_path, minecraft_directory)
+                            zipf.write(file_path, arcname)
 
-            # Try to use 7z (external) for faster archiving if available
-            seven = shutil.which('7z') or shutil.which('7za') or shutil.which('7zr')
-            if seven:
-                backup_archive = os.path.join(minecraft_directory, 'backup', f"Backup-{timestamp}.7z")
-                print(f"Creating archive with 7z ({seven}): {backup_archive}")
-                try:
-                    # run 7z from inside backup_dir to add its contents
-                    subprocess.run([seven, 'a', '-t7z', '-m0=LZMA2:d32m:fb32', '-mx=3', '-mmt=on', backup_archive, '.'], cwd=backup_dir, check=True)
-                    # Remove the temporary backup directory after successful archive creation
-                    shutil.rmtree(backup_dir)
-                    print(f"Backup archive created successfully: {backup_archive}")
-                    return backup_archive
-                except subprocess.CalledProcessError as e:
-                    print(f"7z failed ({e}), falling back to zip method")
-
-            # Fallback: create zip file from backup folder using no compression for speed
-            print(f"Creating backup archive: {backup_zip}")
-            with zipfile.ZipFile(backup_zip, 'w', zipfile.ZIP_STORED) as zipf:
-                for root, dirs, files in os.walk(backup_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, backup_dir)
-                        zipf.write(file_path, arcname)
-
-            # Remove the temporary backup directory after successful zip creation
-            shutil.rmtree(backup_dir)
-            print(f"Backup archive created successfully: {backup_zip}")
-
-            return backup_zip
+        # Save the hash
+        backup_hashes[current_hash] = backup_zip
+        save_backup_hashes(backup_hashes)
+        print(f"Backup archive created successfully: {backup_zip}")
+        return backup_zip
+            
     except Exception as e:
         print(f"Error creating backup: {e}")
+        backup_zip = os.path.join(minecraft_directory, "backup", f"Backup-{timestamp}.zip")
         # Clean up if there was an error
-        if os.path.exists(backup_dir):
-            shutil.rmtree(backup_dir)
         if os.path.exists(backup_zip):
             os.remove(backup_zip)
         raise
@@ -152,9 +208,10 @@ try:
     all_links = response_json['result']['links']
     download_link = None
     
-    # Find the serverBedrockLinux download link
+    # Find the appropriate download link for the current platform
+    platform_type = 'serverBedrockWindows' if SERVER_PLATFORM == 'windows' else 'serverBedrockLinux'
     for link in all_links:
-        if link['downloadType'] == 'serverBedrockWindows':
+        if link['downloadType'] == platform_type:
             download_link = link['downloadUrl']
             break
     
@@ -189,7 +246,7 @@ if not newInstall and local_version and local_version == version:
         f.write(download_link)
     sys.exit(0)
 
-logfile = minecraft_directory+'\\updater\\update.log'
+logfile = os.path.join(minecraft_directory, 'updater', 'update.log')
 
 resourceDir = os.path.join(minecraft_directory, 'updater', 'resources')
 os.makedirs(resourceDir, exist_ok=True)
@@ -326,6 +383,13 @@ try:
                 print(f"Preserved: {item}")
 
     print("\nServer files update completed.")
+    # Set executable permissions on Linux
+    if sys.platform == 'linux':
+        server_executable = os.path.join(minecraft_directory, BEDROCK_EXECUTABLE)
+        if os.path.exists(server_executable):
+            set_executable_permission(server_executable)
+            print(f"Set executable permissions for {BEDROCK_EXECUTABLE}")
+    
     # After successful update, write the version and download link
     try:
         version_file = os.path.join(minecraft_directory, 'updater', 'server_version.txt')
