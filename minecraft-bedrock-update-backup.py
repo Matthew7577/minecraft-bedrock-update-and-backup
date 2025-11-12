@@ -87,7 +87,7 @@ def load_backup_hashes():
         try:
             with open(hash_file, 'r') as f:
                 return json.load(f)
-        except:
+        except Exception:
             return {}
     return {}
 
@@ -224,12 +224,6 @@ except requests.exceptions.Timeout:
 
     download_link=response.text
 
-# Extract version from download link
-import re
-version_match = re.search(r'bedrock-server-(\d+\.\d+\.\d+\.\d+)', download_link)
-version = version_match.group(1) if version_match else "unknown"
-print(f"Download link (version {version}):", download_link)
-
 # Read local version (if any) and skip update if already up-to-date
 version_file = os.path.join(minecraft_directory, 'updater', 'server_version.txt')
 os.makedirs(os.path.dirname(version_file), exist_ok=True)
@@ -237,6 +231,21 @@ local_version = None
 if os.path.isfile(version_file):
     with open(version_file, 'r') as f:
         local_version = f.read().strip()
+        if not local_version:  # If file is empty, set to None
+            local_version = None
+
+# Show Local version
+if local_version is None:
+    print("No local version found")
+else:
+    print(f"Local server version {local_version}")
+
+# Extract version from download link
+import re
+version_match = re.search(r'bedrock-server-(\d+\.\d+\.\d+\.\d+)', download_link)
+version = version_match.group(1) if version_match else "unknown"
+print(f"Download link (version {version}):", download_link)
+
 
 if not newInstall and local_version and local_version == version:
     print(f"Local server version {local_version} is up to date. No update needed.")
@@ -259,9 +268,6 @@ def download_chunk(args):
     headers = {**HEADERS, 'Range': f'bytes={start}-{end}'}
     response = requests.get(url, headers=headers)
     return start, response.content
-version_match = re.search(r'bedrock-server-(\d+\.\d+\.\d+\.\d+)', download_link)
-version = version_match.group(1) if version_match else "unknown"
-
 # Download server file to resourceDir with version in filename
 server_zip = os.path.join(resourceDir, f'bedrock-server-{version}.zip')
 print(f"Downloading server version {version} to {server_zip}...")
